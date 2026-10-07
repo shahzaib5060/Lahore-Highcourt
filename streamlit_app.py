@@ -1,16 +1,21 @@
 """Streamlit wrapper for the LHCBA voter roll dashboard.
 
-The dashboard itself is index.html. Streamlit shows it inside a frame, where
-relative links like photos/sheet_0.jpg don't resolve, so this file reads the
-photo sheets and puts them straight into the page before displaying it.
+The dashboard itself is index.html. Its photos are 9 image sheets
+(sheet_0.jpg to sheet_8.jpg). Sending them through Streamlit made the
+page too heavy to load, so the browser fetches them straight from this
+GitHub repository instead.
 """
-import base64
 from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
 
 HERE = Path(__file__).parent
+
+# Where the browser loads the photo sheets from. This works while the
+# repository is public. If you make it private, the photos will stop
+# showing and this needs to change.
+PHOTO_BASE_URL = "https://raw.githubusercontent.com/shahzaib5060/Lahore-Highcourt/main/"
 
 st.set_page_config(page_title="LHCBA Voter Roll 2022-23", page_icon="⚖️", layout="wide")
 
@@ -30,16 +35,10 @@ st.markdown(
 @st.cache_resource(show_spinner="Loading dashboard…")
 def build_page() -> str:
     html = (HERE / "index.html").read_text(encoding="utf-8")
-    # Photo sheets can sit in a photos/ folder or directly next to this file.
-    sheets = {p.name: p for p in sorted(HERE.rglob("sheet_*.jpg"))}.values()
-    for sheet in sheets:
-        data = base64.b64encode(sheet.read_bytes()).decode("ascii")
-        html = html.replace(f'"photos/{sheet.name}"', f'"data:image/jpeg;base64,{data}"')
+    for k in range(9):
+        name = f"sheet_{k}.jpg"
+        html = html.replace(f'"photos/{name}"', f'"{PHOTO_BASE_URL}{name}"')
     return html
 
 
-page = build_page()
-if '"photos/sheet_' in page:
-    st.warning("Some photo files (sheet_0.jpg to sheet_8.jpg) are missing from the repository, so a few members will show initials instead of photos.")
-
-components.html(page, height=1600, scrolling=True)
+components.html(build_page(), height=1600, scrolling=True)
