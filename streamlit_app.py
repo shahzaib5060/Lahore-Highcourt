@@ -1,44 +1,435 @@
-"""Streamlit wrapper for the LHCBA voter roll dashboard.
+"""Punjab Lawyers Directory - Justice Dashboard (Streamlit).
 
-The dashboard itself is index.html. Its photos are 9 image sheets
-(sheet_0.jpg to sheet_8.jpg). Sending them through Streamlit made the
-page too heavy to load, so the browser fetches them straight from this
-GitHub repository instead.
+Data source
+-----------
+* By default the app reads lawyers.csv from the repository.
+* To use Supabase instead, add your project's URL and key to the app's
+  secrets (Streamlit Cloud: Manage app -> Settings -> Secrets):
+
+      [supabase]
+      url = "https://YOUR-PROJECT.supabase.co"
+      key = "YOUR-ANON-OR-SERVICE-KEY"
+      table = "lawyers"          # optional, defaults to "lawyers"
+
+  The table needs the same columns as lawyers.csv (see supabase_schema.sql).
+
+Photos
+------
+Member photos come from 9 image sheets (sheet_0.jpg ... sheet_8.jpg), each a
+40-column grid of 72x72 px photos. Each lawyer's photo_sheet and photo_pos
+say where their photo sits. If you later store one image per lawyer (for
+example in Supabase Storage), add a photo_url column and the app uses that
+instead.
 """
+from __future__ import annotations
+
+import base64
+import html
+import io
+import math
 from pathlib import Path
 
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
+from PIL import Image
 
 HERE = Path(__file__).parent
+CSV_PATH = HERE / "lawyers.csv"
+SHEET_COLS = 40
+PHOTO_PX = 72
 
-# Where the browser loads the photo sheets from. This works while the
-# repository is public. If you make it private, the photos will stop
-# showing and this needs to change.
-PHOTO_BASE_URL = "https://raw.githubusercontent.com/shahzaib5060/Lahore-Highcourt/main/"
+# Colours (checked for colour-blind readers against a white background).
+NAVY = "#14204A"
+GOLD = "#F0B429"
+S1, S2, S3 = "#3A57B8", "#D4980F", "#23A08C"
+INK, MUTED, GRID = "#141B33", "#7A839E", "#E6EAF3"
 
-st.set_page_config(page_title="LHCBA Voter Roll 2022-23", page_icon="⚖️", layout="wide")
+st.set_page_config(
+    page_title="Punjab Lawyers Dashboard",
+    page_icon="⚖️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# Remove Streamlit's own padding and header so the dashboard fills the window.
+# --------------------------------------------------------------------------
+# Styling
+# --------------------------------------------------------------------------
 st.markdown(
-    """
+    f"""
     <style>
-      .block-container {padding: 0 !important; max-width: 100% !important;}
-      header[data-testid="stHeader"] {display: none;}
-      iframe {display: block;}
+    @import url('https://fonts.googleapis.com/css2?family=Libre+Caslon+Text:wght@700&family=Public+Sans:wght@400;600;700&display=swap');
+    .stApp, .stMarkdown p, .stMarkdown li {{ font-family: 'Public Sans', sans-serif; }}
+    .stMarkdown h1, .stMarkdown h1 *, .stMarkdown h3, .stMarkdown h3 * {{ font-family: 'Libre Caslon Text', Georgia, serif !important; color:{INK}; }}
+    .stMarkdown h1 {{ font-size: 2.1rem !important; padding-bottom: .2rem !important; }}
+    .stMarkdown h3 {{ font-size: 1.12rem !important; padding: .1rem 0 .5rem !important; }}
+    .block-container {{ padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1400px; }}
+    [data-testid="stSidebar"] {{ background: {NAVY}; }}
+    .brand {{ display:flex; gap:12px; align-items:center; padding:4px 0 14px;
+             border-bottom:1px solid rgba(255,255,255,.12); margin-bottom:8px; }}
+    .brand .logo {{ width:42px; height:42px; border-radius:10px; background:{GOLD};
+                   display:grid; place-items:center; font-size:22px; }}
+    .brand b {{ display:block; color:#fff; font-family:'Libre Caslon Text',serif; font-size:18px; line-height:1.15; }}
+    .brand span {{ color:#A9B2D3; font-size:12.5px; }}
+    .kpi {{ background:#fff; border-radius:14px; padding:16px 18px; border-top:3px solid {GOLD};
+           box-shadow:0 1px 2px rgba(20,27,51,.06),0 4px 16px rgba(20,27,51,.06); height:100%; }}
+    .kpi .h {{ color:#4A5372; font-size:13px; font-weight:600; }}
+    .kpi .v {{ color:{INK}; font-size:30px; font-weight:700; line-height:1.15; margin:4px 0 6px; }}
+    .kpi .d {{ color:{MUTED}; font-size:12.5px; }}
+    .kpi .m {{ height:6px; background:{GRID}; border-radius:3px; overflow:hidden; margin:2px 0 6px; }}
+    .kpi .m i {{ display:block; height:100%; background:{S1}; border-radius:3px; }}
+    .stMarkdown p.sub, .sub {{ color:{MUTED}; font-size:13px !important; margin:-6px 0 6px; line-height:1.4; }}
+    [data-testid="stVerticalBlockBorderWrapper"] {{ border-radius:14px; }}
+    .cards {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:14px; }}
+    .card {{ background:#F6F8FC; border:1px solid #DDE2EE; border-radius:12px; padding:12px; text-align:center; }}
+    .card .ph {{ width:92px; height:92px; border-radius:50%; margin:4px auto 10px; border:3px solid #fff;
+                box-shadow:0 0 0 2px {GOLD}; background:{GRID}; object-fit:cover; display:block; }}
+    .card .ini {{ display:flex; align-items:center; justify-content:center; font-family:'Libre Caslon Text',serif;
+                 font-size:26px; color:{MUTED}; }}
+    .card .n {{ font-weight:700; font-size:13.5px; line-height:1.3; color:{INK}; }}
+    .card .p, .card .s {{ font-size:12px; color:{MUTED}; }}
+    .tag {{ display:inline-block; margin-top:6px; font-size:12px; padding:2px 8px; border-radius:999px;
+           background:#E9EDF8; color:{S1}; font-weight:600; }}
+    .tag.o {{ background:#EEF0F5; color:#4A5372; font-weight:400; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-@st.cache_resource(show_spinner="Loading dashboard…")
-def build_page() -> str:
-    html = (HERE / "index.html").read_text(encoding="utf-8")
-    for k in range(9):
-        name = f"sheet_{k}.jpg"
-        html = html.replace(f'"photos/{name}"', f'"{PHOTO_BASE_URL}{name}"')
-    return html
+# --------------------------------------------------------------------------
+# Data
+# --------------------------------------------------------------------------
+def _supabase_settings() -> dict | None:
+    try:
+        cfg = st.secrets["supabase"]
+        return {"url": cfg["url"], "key": cfg["key"], "table": cfg.get("table", "lawyers")}
+    except Exception:
+        return None
 
 
-components.html(build_page(), height=1600, scrolling=True)
+@st.cache_data(ttl=600, show_spinner="Loading lawyers…")
+def load_data() -> tuple[pd.DataFrame, str]:
+    cfg = _supabase_settings()
+    if cfg:
+        from supabase import create_client
+
+        client = create_client(cfg["url"], cfg["key"])
+        rows, start, step = [], 0, 1000  # Supabase returns at most 1,000 rows per request
+        while True:
+            batch = (client.table(cfg["table"]).select("*").order("id")
+                     .range(start, start + step - 1).execute().data)
+            rows.extend(batch)
+            if len(batch) < step:
+                break
+            start += step
+        df = pd.DataFrame(rows)
+        source = "Supabase"
+    else:
+        df = pd.read_csv(CSV_PATH, dtype={"office_address": str, "parentage": str})
+        source = "lawyers.csv"
+
+    df["parentage"] = df["parentage"].fillna("")
+    df["office_address"] = df["office_address"].fillna("")
+    df["life_member"] = df["life_member"].astype(str).str.lower().isin(["true", "1", "yes", "t"])
+    df["photo_sheet"] = pd.to_numeric(df.get("photo_sheet"), errors="coerce")
+    df["photo_pos"] = pd.to_numeric(df.get("photo_pos"), errors="coerce")
+    if "photo_url" not in df:
+        df["photo_url"] = None
+    df["has_photo"] = df["photo_sheet"].notna() | df["photo_url"].notna()
+    df["sort_name"] = df["name"].str.replace(r"^(Mr|Ms|Mrs|Mst|Dr|Miss)\.\s*", "", regex=True)
+    df.loc[df["sort_name"].str.startswith("("), "sort_name"] = "~"  # unnamed card goes last
+    return df, source
+
+
+@st.cache_resource
+def load_sheet(k: int) -> Image.Image | None:
+    path = HERE / f"sheet_{k}.jpg"
+    if not path.exists():
+        path = HERE / "photos" / f"sheet_{k}.jpg"
+    return Image.open(path).convert("RGB") if path.exists() else None
+
+
+@st.cache_data(max_entries=5000)
+def photo_data_uri(sheet: int, pos: int) -> str | None:
+    img = load_sheet(sheet)
+    if img is None:
+        return None
+    col, row = pos % SHEET_COLS, pos // SHEET_COLS
+    crop = img.crop((col * PHOTO_PX, row * PHOTO_PX, (col + 1) * PHOTO_PX, (row + 1) * PHOTO_PX))
+    buf = io.BytesIO()
+    crop.save(buf, "JPEG", quality=88)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+df, source = load_data()
+
+# --------------------------------------------------------------------------
+# Sidebar filters
+# --------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown(
+        '<div class="brand"><div class="logo">⚖️</div><div><b>Justice Dashboard</b>'
+        "<span>LHCBA voter roll 2022–23</span></div></div>",
+        unsafe_allow_html=True,
+    )
+    station_order = df["station"].value_counts().index.tolist()
+    stations = st.multiselect("Bar station", station_order, placeholder="All stations")
+    membership = st.radio("Membership", ["All", "Life", "Ordinary"], horizontal=True)
+    gender = st.radio("Gender", ["All", "Male", "Female"], horizontal=True)
+    chambers = st.radio("Chambers", ["All", "Local courts", "Lahore", "Not listed"], horizontal=True)
+    photo = st.radio("Photo", ["All", "With photo", "Without"], horizontal=True)
+    st.caption(f"Data source: {source}. Phone numbers and home addresses are not included.")
+
+f = df
+if stations:
+    f = f[f["station"].isin(stations)]
+if membership != "All":
+    f = f[f["life_member"] == (membership == "Life")]
+if gender != "All":
+    f = f[f["gender"] == gender]
+if chambers != "All":
+    f = f[f["chambers"] == chambers]
+if photo != "All":
+    f = f[f["has_photo"] == (photo == "With photo")]
+
+n = len(f)
+
+
+def pct(a: int, b: int) -> str:
+    return f"{a / b:.0%}" if b else "–"
+
+
+# --------------------------------------------------------------------------
+# Header + KPIs
+# --------------------------------------------------------------------------
+st.markdown("# Punjab Lawyers Directory")
+n_st = f["station"].nunique()
+st.markdown(
+    f'<p class="sub">{n:,} lawyers across {n_st} bar station{"s" if n_st != 1 else ""}'
+    f'{" in Punjab, Lahore included" if n == len(df) else ""}</p>',
+    unsafe_allow_html=True,
+)
+
+life, women, with_photo = int(f["life_member"].sum()), int((f["gender"] == "Female").sum()), int(f["has_photo"].sum())
+
+
+def kpi(col, head, value, detail, meter=None):
+    m = f'<div class="m"><i style="width:{meter:.1f}%"></i></div>' if meter is not None else ""
+    col.markdown(
+        f'<div class="kpi"><div class="h">{head}</div><div class="v">{value}</div>{m}<div class="d">{detail}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+k = st.columns(5)
+kpi(k[0], "👥 Lawyers", f"{n:,}", "on the voter roll" if not stations else "in selected stations")
+kpi(k[1], "🎖️ Life members", pct(life, n), f"{life:,} of {n:,}", life / n * 100 if n else 0)
+kpi(k[2], "👩‍⚖️ Women", pct(women, n), f"{women:,} women lawyers", women / n * 100 if n else 0)
+kpi(k[3], "🏛️ Bar stations", f"{n_st}", f"of {df['station'].nunique()} on the roll")
+kpi(k[4], "📷 With photo", pct(with_photo, n), f"{with_photo:,} cards have a photo", with_photo / n * 100 if n else 0)
+st.write("")
+
+if n == 0:
+    st.info("No lawyers match these filters. Change or clear a filter in the sidebar.")
+    st.stop()
+
+
+# --------------------------------------------------------------------------
+# Charts
+# --------------------------------------------------------------------------
+def style(fig: go.Figure, height: int) -> go.Figure:
+    fig.update_layout(
+        height=height,
+        margin=dict(l=8, r=8, t=8, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Public Sans, sans-serif", color="#4A5372", size=12),
+        hoverlabel=dict(bgcolor=INK, font_color="#fff", bordercolor=INK),
+        showlegend=False,
+    )
+    return fig
+
+
+def donut(values: dict[str, int], colors: list[str], center: str) -> go.Figure:
+    labels, counts = list(values), list(values.values())
+    fig = go.Figure(
+        go.Pie(
+            labels=labels, values=counts, hole=0.64, sort=False, direction="clockwise",
+            marker=dict(colors=colors, line=dict(color="#fff", width=2)),
+            textinfo="none",
+            hovertemplate="<b>%{label}</b><br>%{value:,} lawyers (%{percent})<extra></extra>",
+        )
+    )
+    fig.add_annotation(text=f"<b>{center}</b><br><span style='font-size:11px;color:{MUTED}'>lawyers</span>",
+                       showarrow=False, font=dict(size=20, color=INK))
+    fig.update_traces(domain=dict(x=[0, 0.56], y=[0, 1]))
+    fig.update_annotations(x=0.28, xref="paper", y=0.5, yref="paper", xanchor="center", yanchor="middle")
+    style(fig, 200)
+    fig.update_layout(showlegend=True, legend=dict(orientation="v", x=0.62, y=0.5, yanchor="middle", font=dict(size=13)))
+    return fig
+
+
+c1, c2 = st.columns([1.7, 1])
+with c1:
+    with st.container(border=True):
+        st.markdown("### Lawyers by bar station")
+        st.markdown('<p class="sub">Hover for life-membership share. Use the sidebar to filter by station.</p>',
+                    unsafe_allow_html=True)
+        by_st = (f.groupby("station").agg(lawyers=("name", "size"), life=("life_member", "mean"))
+                 .sort_values("lawyers", ascending=False))
+        show_all = st.toggle(f"Show all {len(by_st)} stations", value=False) if len(by_st) > 12 else True
+        top = by_st if show_all else by_st.head(12)
+        top = top.iloc[::-1]
+        fig = go.Figure(go.Bar(
+            x=top["lawyers"], y=top.index, orientation="h", marker=dict(color=S1, cornerradius=4),
+            text=[f"{v:,}" for v in top["lawyers"]], textposition="outside", cliponaxis=False,
+            customdata=top["life"], hovertemplate="<b>%{y}</b><br>%{x:,} lawyers<br>%{customdata:.0%} life members<extra></extra>",
+        ))
+        fig.update_xaxes(range=[0, top["lawyers"].max() * 1.14], showgrid=False, zeroline=False, showticklabels=False)
+        fig.update_yaxes(showgrid=False, tickfont=dict(size=12.5, color=INK))
+        st.plotly_chart(style(fig, max(260, 26 * len(top) + 20)), use_container_width=True, config={"displayModeBar": False})
+
+with c2:
+    with st.container(border=True):
+        st.markdown("### Membership type")
+        st.plotly_chart(donut({"Life members": life, "Ordinary": n - life}, [S1, S2], f"{n:,}"),
+                        use_container_width=True, config={"displayModeBar": False})
+        st.markdown("### Gender")
+        st.plotly_chart(donut({"Men": n - women, "Women": women}, [S1, S2], f"{n:,}"),
+                        use_container_width=True, config={"displayModeBar": False})
+
+c3, c4, c5 = st.columns(3)
+with c3:
+    with st.container(border=True):
+        st.markdown("### Where they keep chambers")
+        st.markdown('<p class="sub">Office address on the voter card.</p>', unsafe_allow_html=True)
+        ch = f["chambers"].value_counts()
+        st.plotly_chart(
+            donut({k: int(ch.get(k, 0)) for k in ["Local courts", "Lahore", "Not listed"]}, [S1, S2, S3], f"{n:,}"),
+            use_container_width=True, config={"displayModeBar": False},
+        )
+with c4:
+    with st.container(border=True):
+        st.markdown("### When they joined")
+        st.markdown('<p class="sub">By membership number; lower joined earlier.</p>', unsafe_allow_html=True)
+        bins = [0, 10_000, 20_000, 30_000, 40_000, math.inf]
+        labels = ["Under 10k", "10k–20k", "20k–30k", "30k–40k", "40k+"]
+        era = pd.cut(f["membership_no"], bins=bins, labels=labels, right=False).value_counts().reindex(labels)
+        fig = go.Figure(go.Bar(
+            x=labels, y=era.values, marker=dict(color=S1, cornerradius=4),
+            text=[f"{v:,}" for v in era.values], textposition="outside", cliponaxis=False,
+            hovertemplate="<b>Membership no. %{x}</b><br>%{y:,} lawyers<extra></extra>",
+        ))
+        fig.update_yaxes(showgrid=True, gridcolor=GRID, showticklabels=False, zeroline=False)
+        st.plotly_chart(style(fig, 220), use_container_width=True, config={"displayModeBar": False})
+with c5:
+    with st.container(border=True):
+        st.markdown("### Directory coverage")
+        st.markdown('<p class="sub">How complete the printed cards are.</p>', unsafe_allow_html=True)
+        cov = pd.Series({
+            "Photo on card": f["has_photo"].mean(),
+            "Office address": (f["chambers"] != "Not listed").mean(),
+            "Parentage printed": (~f["parentage"].str.fullmatch(r"(S/o|D/o, W/o)?\s*\.?\s*")).mean(),
+            "Life membership": f["life_member"].mean(),
+        }).iloc[::-1]
+        fig = go.Figure(go.Bar(
+            x=cov.values, y=cov.index, orientation="h", marker=dict(color=S1, cornerradius=4),
+            text=[f"{v:.0%}" for v in cov.values], textposition="outside", cliponaxis=False,
+            hovertemplate="<b>%{y}</b><br>%{x:.0%}<extra></extra>",
+        ))
+        fig.update_xaxes(range=[0, 1.15], showgrid=False, showticklabels=False, zeroline=False)
+        st.plotly_chart(style(fig, 220), use_container_width=True, config={"displayModeBar": False})
+
+# --------------------------------------------------------------------------
+# Station scorecard
+# --------------------------------------------------------------------------
+with st.container(border=True):
+    st.markdown("### Station scorecard")
+    st.markdown('<p class="sub">Every station side by side. Select a column heading to sort.</p>', unsafe_allow_html=True)
+    sc = f.groupby("station").agg(
+        lawyers=("name", "size"),
+        life=("life_member", "mean"),
+        women=("gender", lambda s: (s == "Female").mean()),
+        lahore=("chambers", lambda s: (s == "Lahore").mean()),
+        photo=("has_photo", "mean"),
+    ).sort_values("lawyers", ascending=False)
+    sc.loc[sc.index == "Lahore", "lahore"] = None  # Lahore is their home station
+    sc[["life", "women", "lahore", "photo"]] *= 100
+    pc = lambda label: st.column_config.ProgressColumn(label, format="%.0f%%", min_value=0, max_value=100)
+    st.dataframe(
+        sc.reset_index(),
+        hide_index=True,
+        use_container_width=True,
+        height=min(460, 38 + 35 * len(sc)),
+        column_config={
+            "station": st.column_config.TextColumn("Station"),
+            "lawyers": st.column_config.NumberColumn("Lawyers", format="localized"),
+            "life": pc("Life members"),
+            "women": pc("Women"),
+            "lahore": pc("Lahore chambers"),
+            "photo": pc("With photo"),
+        },
+    )
+
+# --------------------------------------------------------------------------
+# Member directory
+# --------------------------------------------------------------------------
+with st.container(border=True):
+    st.markdown("### Member directory")
+    q = st.text_input("Search", placeholder="Search by name, parentage, office or vote number", label_visibility="collapsed")
+    d = f
+    if q.strip():
+        hay = d["name"] + " " + d["parentage"] + " " + d["office_address"] + " " + d["vote_no"].astype(str)
+        d = d[hay.str.contains(q.strip(), case=False, regex=False)]
+    d = d.sort_values(["sort_name", "vote_no"])
+    st.markdown(f'<p class="sub">{len(d):,} lawyers match the current filters{" and search" if q.strip() else ""}.</p>',
+                unsafe_allow_html=True)
+
+    tab_cards, tab_table = st.tabs(["Photo cards", "Table"])
+    with tab_cards:
+        per_page = 36
+        pages = max(1, math.ceil(len(d) / per_page))
+        page = st.number_input(f"Page (1–{pages})", min_value=1, max_value=pages, value=1, step=1) if pages > 1 else 1
+        chunk = d.iloc[(page - 1) * per_page: page * per_page]
+
+        def card(r) -> str:
+            name = html.escape(str(r["name"]))
+            uri = r["photo_url"] if isinstance(r["photo_url"], str) and r["photo_url"] else None
+            if uri is None and pd.notna(r["photo_sheet"]):
+                uri = photo_data_uri(int(r["photo_sheet"]), int(r["photo_pos"]))
+            if uri:
+                pic = f'<img class="ph" src="{html.escape(uri)}" alt="Photo of {name}">'
+            else:
+                ini = "".join(w[0] for w in str(r["name"]).split(". ", 1)[-1].replace("(", "").split()[:2])
+                pic = f'<div class="ph ini">{html.escape(ini)}</div>'
+            tag = '<span class="tag">Life member</span>' if r["life_member"] else '<span class="tag o">Ordinary</span>'
+            return (f'<div class="card">{pic}<div class="n">{name}</div><div class="p">{html.escape(r["parentage"])}</div>'
+                    f'<div class="s">{html.escape(r["station"])} · Vote no. {int(r["vote_no"])}</div>{tag}</div>')
+
+        if len(chunk):
+            st.markdown('<div class="cards">' + "".join(card(r) for _, r in chunk.iterrows()) + "</div>",
+                        unsafe_allow_html=True)
+            st.caption(f"Showing {(page - 1) * per_page + 1:,}–{(page - 1) * per_page + len(chunk):,} of {len(d):,}")
+        else:
+            st.info("No lawyers match. Clear the search or a filter to see more.")
+
+    with tab_table:
+        table = d[["name", "parentage", "station", "vote_no", "membership_no", "life_member", "gender", "chambers", "office_address"]]
+        st.dataframe(
+            table, hide_index=True, use_container_width=True, height=480,
+            column_config={
+                "name": "Name", "parentage": "Parentage", "station": "Station",
+                "vote_no": st.column_config.NumberColumn("Vote no.", format="%d"),
+                "membership_no": st.column_config.NumberColumn("Membership no.", format="%d"),
+                "life_member": st.column_config.CheckboxColumn("Life member"),
+                "gender": "Gender", "chambers": "Chambers", "office_address": "Office address",
+            },
+        )
+        st.download_button("Download these rows as CSV", table.to_csv(index=False).encode("utf-8"),
+                           file_name="lawyers_filtered.csv", mime="text/csv")
+
+st.caption(
+    'Source: Lahore High Court Bar Association voter lists 2022–23. Women are counted from the "D/o, W/o" field and '
+    "Ms./Mrs./Mst./Miss titles as printed. \"Lahore\" chambers counts outstation members with a Lahore office address."
+)
