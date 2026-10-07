@@ -40,8 +40,9 @@ SHEET_COLS = 40
 PHOTO_PX = 72
 
 # Colours (checked for colour-blind readers against a white background).
-NAVY = "#14204A"
-GOLD = "#F0B429"
+NAVY = "#1B2A6B"   # brand navy: header block, selected controls
+GOLD = "#F0B429"   # brand gold: highlights
+BG, LINE = "#F4F6FB", "#E1E6F0"
 S1, S2, S3 = "#3A57B8", "#D4980F", "#23A08C"
 INK, MUTED, GRID = "#141B33", "#7A839E", "#E6EAF3"
 
@@ -64,24 +65,43 @@ st.markdown(
     .stMarkdown h1 {{ font-size: 2.1rem !important; padding-bottom: .2rem !important; }}
     .stMarkdown h3 {{ font-size: 1.12rem !important; padding: .1rem 0 .5rem !important; }}
     .block-container {{ padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1400px; }}
-    [data-testid="stSidebar"] {{ background: {NAVY}; }}
-    .brand {{ display:flex; gap:12px; align-items:center; padding:4px 0 14px;
-             border-bottom:1px solid rgba(255,255,255,.12); margin-bottom:8px; }}
+    .stApp {{ background:{BG}; }}
+    [data-testid="stHeader"] {{ background:transparent; }}
+
+    /* sidebar: white panel, navy brand block */
+    [data-testid="stSidebar"] {{ background:#FFFFFF; border-right:1px solid {LINE}; }}
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{ color:{INK}; font-weight:600; font-size:13px; }}
+    [data-testid="stSidebar"] label[data-baseweb="radio"] p {{ color:#4A5372; }}
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{ color:{MUTED}; }}
+    .brand {{ display:flex; gap:12px; align-items:center; background:{NAVY}; border-radius:14px;
+             padding:14px; margin:0 0 10px; box-shadow:0 6px 18px rgba(27,42,107,.25); }}
     .brand .logo {{ width:42px; height:42px; border-radius:10px; background:{GOLD};
-                   display:grid; place-items:center; font-size:22px; }}
-    .brand b {{ display:block; color:#fff; font-family:'Libre Caslon Text',serif; font-size:18px; line-height:1.15; }}
-    .brand span {{ color:#A9B2D3; font-size:12.5px; }}
-    .kpi {{ background:#fff; border-radius:14px; padding:16px 18px; border-top:3px solid {GOLD};
+                   display:grid; place-items:center; font-size:22px; flex:0 0 42px; }}
+    .brand b {{ display:block; color:#FFFFFF; font-family:'Libre Caslon Text',serif; font-size:18px; line-height:1.15; }}
+    .brand span {{ color:#C9D0EA; font-size:12.5px; }}
+
+    /* controls in brand navy, whether or not the theme file is present */
+    [data-testid="stRadioOption"][data-selected="true"] > div > div:first-child {{ background-color:{NAVY} !important; border-color:{NAVY} !important; }}
+    [data-testid="stMultiSelect"] span[data-tag] {{ background-color:{NAVY} !important; color:#FFFFFF !important; }}
+    [data-focus-within="true"][role="group"], [data-testid="stTextInput"] [data-focus-within="true"],
+    [data-testid="stNumberInput"] [data-focus-within="true"] {{ border-color:{NAVY} !important; }}
+    [data-testid="stTab"][aria-selected="true"], [data-testid="stTab"][aria-selected="true"] p {{ color:{NAVY} !important; font-weight:700; }}
+    .react-aria-SelectionIndicator {{ background-color:{GOLD} !important; }}
+    label[data-selected="true"]:has(input[role="switch"]) > div:first-of-type {{ background-color:{NAVY} !important; }}
+
+    /* panels */
+    [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]) {{ background:#FFFFFF; }}
+    [data-testid="stVerticalBlockBorderWrapper"] {{ border-radius:14px; border-color:{LINE} !important; }}
+    .kpi {{ background:#fff; border-radius:14px; padding:16px 18px; border:1px solid {LINE}; border-top:3px solid {GOLD};
            box-shadow:0 1px 2px rgba(20,27,51,.06),0 4px 16px rgba(20,27,51,.06); height:100%; }}
     .kpi .h {{ color:#4A5372; font-size:13px; font-weight:600; }}
     .kpi .v {{ color:{INK}; font-size:30px; font-weight:700; line-height:1.15; margin:4px 0 6px; }}
     .kpi .d {{ color:{MUTED}; font-size:12.5px; }}
     .kpi .m {{ height:6px; background:{GRID}; border-radius:3px; overflow:hidden; margin:2px 0 6px; }}
-    .kpi .m i {{ display:block; height:100%; background:{S1}; border-radius:3px; }}
+    .kpi .m i {{ display:block; height:100%; background:{NAVY}; border-radius:3px; }}
     .stMarkdown p.sub, .sub {{ color:{MUTED}; font-size:13px !important; margin:-6px 0 6px; line-height:1.4; }}
-    [data-testid="stVerticalBlockBorderWrapper"] {{ border-radius:14px; }}
     .cards {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:14px; }}
-    .card {{ background:#F6F8FC; border:1px solid #DDE2EE; border-radius:12px; padding:12px; text-align:center; }}
+    .card {{ background:#FFFFFF; border:1px solid {LINE}; border-radius:12px; padding:12px; text-align:center; }}
     .card .ph {{ width:92px; height:92px; border-radius:50%; margin:4px auto 10px; border:3px solid #fff;
                 box-shadow:0 0 0 2px {GOLD}; background:{GRID}; object-fit:cover; display:block; }}
     .card .ini {{ display:flex; align-items:center; justify-content:center; font-family:'Libre Caslon Text',serif;
@@ -89,7 +109,7 @@ st.markdown(
     .card .n {{ font-weight:700; font-size:13.5px; line-height:1.3; color:{INK}; }}
     .card .p, .card .s {{ font-size:12px; color:{MUTED}; }}
     .tag {{ display:inline-block; margin-top:6px; font-size:12px; padding:2px 8px; border-radius:999px;
-           background:#E9EDF8; color:{S1}; font-weight:600; }}
+           background:#FFF4D6; color:#7A5600; font-weight:600; }}
     .tag.o {{ background:#EEF0F5; color:#4A5372; font-weight:400; }}
     </style>
     """,
@@ -288,7 +308,8 @@ with c1:
         ))
         fig.update_xaxes(range=[0, top["lawyers"].max() * 1.14], showgrid=False, zeroline=False, showticklabels=False)
         fig.update_yaxes(showgrid=False, tickfont=dict(size=12.5, color=INK))
-        st.plotly_chart(style(fig, max(260, 26 * len(top) + 20)), use_container_width=True, config={"displayModeBar": False})
+        fig.update_traces(width=0.7)
+        st.plotly_chart(style(fig, max(110, 28 * len(top) + 30)), use_container_width=True, config={"displayModeBar": False})
 
 with c2:
     with st.container(border=True):
