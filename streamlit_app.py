@@ -2,21 +2,17 @@
 
 Login and data
 --------------
-The app asks for a login before showing anything. Set one of these up in the
-app's secrets (Streamlit Cloud: Manage app -> Settings -> Secrets):
+Put these in the app's secrets (Streamlit Cloud: Manage app -> Settings -> Secrets):
 
-1. Supabase (recommended): people sign in with an email and password you
-   create in Supabase, and the lawyer data is read from the Supabase table.
+    [passwords]                  # who can open the dashboard
+    shahzaib = "choose-a-strong-password"
 
-       [supabase]
-       url = "https://YOUR-PROJECT.supabase.co"
-       anon_key = "YOUR-ANON-PUBLIC-KEY"
-       table = "lawyers"          # optional
+    [supabase]                   # optional: read the data from Supabase
+    url = "https://YOUR-PROJECT-ID.supabase.co"
+    key = "YOUR-SECRET-KEY"      # secret / service_role key (stays on the server)
+    table = "lawyers"            # optional
 
-2. Simple passwords (no Supabase yet): data comes from lawyers.csv.
-
-       [passwords]
-       shahzaib = "choose-a-strong-password"
+Without [supabase], the data comes from lawyers.csv.
 
 Photos
 ------
@@ -148,14 +144,8 @@ def _secret_section(name: str) -> dict | None:
         return None
 
 
-SUPABASE = _secret_section("supabase")
-PASSWORDS = _secret_section("passwords")
-
-
-def _supabase_client():
-    from supabase import create_client
-
-    return create_client(SUPABASE["url"], SUPABASE.get("anon_key") or SUPABASE["key"])
+SUPABASE = _secret_section("supabase")    # url + key  -> data comes from Supabase
+PASSWORDS = _secret_section("passwords")  # username = "password" lines -> who can open the dashboard
 
 
 # --------------------------------------------------------------------------
@@ -172,29 +162,21 @@ def login_screen() -> None:
         "<span>Punjab lawyers directory · sign in to continue</span></div></div>",
         unsafe_allow_html=True,
     )
-    if not SUPABASE and not PASSWORDS:
-        st.error("Login isn't set up yet. Add a [supabase] or [passwords] section to the app's secrets "
+    if not PASSWORDS:
+        st.error("Login isn't set up yet. Add a [passwords] section to the app's secrets "
                  "(Manage app → Settings → Secrets). See README.md for the exact text.")
         st.stop()
     with st.form("login"):
-        user = st.text_input("Email" if SUPABASE else "Username")
+        user = st.text_input("Username")
         pw = st.text_input("Password", type="password")
         ok = st.form_submit_button("Sign in", type="primary", use_container_width=True)
     if ok:
-        if SUPABASE:
-            try:
-                res = _supabase_client().auth.sign_in_with_password({"email": user.strip(), "password": pw})
-                st.session_state.auth = {"user": res.user.email, "token": res.session.access_token}
-                st.rerun()
-            except Exception:
-                st.error("Email or password is incorrect.")
+        expected = PASSWORDS.get(user.strip())
+        if expected is not None and hmac.compare_digest(str(expected), pw):
+            st.session_state.auth = {"user": user.strip()}
+            st.rerun()
         else:
-            expected = PASSWORDS.get(user.strip())
-            if expected is not None and hmac.compare_digest(str(expected), pw):
-                st.session_state.auth = {"user": user.strip(), "token": None}
-                st.rerun()
-            else:
-                st.error("Username or password is incorrect.")
+            st.error("Username or password is incorrect.")
 
 
 if "auth" not in st.session_state:
@@ -205,13 +187,14 @@ if "auth" not in st.session_state:
 # --------------------------------------------------------------------------
 # Data
 # --------------------------------------------------------------------------
-@st.cache_data(ttl=600, show_spinner="Loading lawyers…")
-def load_supabase(url: str, table: str, _token: str) -> pd.DataFrame:
-    pg = _supabase_client().postgrest
-    pg.auth(_token)  # read as the signed-in user, so the table's read policy applies
+@st.cache_data(ttl=600, show_spinner="Loading lawyers from Supabase…")
+def load_supabase(url: str, key: str, table: str) -> pd.DataFrame:
+    from supabase import create_client
+
+    client = create_client(url, key)
     rows, start, step = [], 0, 1000  # Supabase returns at most 1,000 rows per request
     while True:
-        batch = pg.from_(table).select("*").order("id").range(start, start + step - 1).execute().data
+        batch = client.table(table).select("*").order("id").range(start, start + step - 1).execute().data
         rows.extend(batch)
         if len(batch) < step:
             break
@@ -241,18 +224,13 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
 
 if SUPABASE:
     try:
-        raw = load_supabase(SUPABASE["url"], SUPABASE.get("table", "lawyers"), st.session_state.auth["token"])
+        raw = load_supabase(SUPABASE["url"], SUPABASE["key"], SUPABASE.get("table", "lawyers"))
     except Exception as exc:
-        load_supabase.clear()
-        if "JWT" in str(exc) or "expired" in str(exc).lower():
-            del st.session_state["auth"]
-            st.warning("Your session expired. Please sign in again.")
-            st.rerun()
-        st.error(f"Couldn't read the lawyers table from Supabase: {exc}")
+        st.error(f"Couldn't read the lawyers table from Supabase. Check the url and key in Secrets. Details: {exc}")
         st.stop()
     if raw.empty:
-        st.error("Supabase returned no rows. Check that lawyers.csv is imported and that the read policy "
-                 "from supabase_schema.sql was created.")
+        st.error("Supabase returned no rows. Import lawyers.csv into the lawyers table, and make sure the key in "
+                 "Secrets is the secret (service_role) key, not the anon/publishable key.")
         st.stop()
     source = "Supabase"
 else:
@@ -298,7 +276,7 @@ with st.sidebar:
     photo = st.radio("Photo", ["All", "With photo", "Without"], horizontal=True)
     st.caption(f"Data source: {source}. Phone numbers and home addresses are not included.")
     st.divider()
-    st.caption(f"Signed in as **{st.session_state.auth['user']}**")
+    st.caption(f"Signed in as {st.session_state.auth['user']}")
     if st.button("Sign out", use_container_width=True):
         del st.session_state["auth"]
         st.rerun()
