@@ -1,29 +1,34 @@
 """Punjab Lawyers Directory - Justice Dashboard (Streamlit).
 
-Data source
------------
-* By default the app reads lawyers.csv from the repository.
-* To use Supabase instead, add your project's URL and key to the app's
-  secrets (Streamlit Cloud: Manage app -> Settings -> Secrets):
+Login and data
+--------------
+The app asks for a login before showing anything. Set one of these up in the
+app's secrets (Streamlit Cloud: Manage app -> Settings -> Secrets):
 
-      [supabase]
-      url = "https://YOUR-PROJECT.supabase.co"
-      key = "YOUR-ANON-OR-SERVICE-KEY"
-      table = "lawyers"          # optional, defaults to "lawyers"
+1. Supabase (recommended): people sign in with an email and password you
+   create in Supabase, and the lawyer data is read from the Supabase table.
 
-  The table needs the same columns as lawyers.csv (see supabase_schema.sql).
+       [supabase]
+       url = "https://YOUR-PROJECT.supabase.co"
+       anon_key = "YOUR-ANON-PUBLIC-KEY"
+       table = "lawyers"          # optional
+
+2. Simple passwords (no Supabase yet): data comes from lawyers.csv.
+
+       [passwords]
+       shahzaib = "choose-a-strong-password"
 
 Photos
 ------
 Member photos come from 9 image sheets (sheet_0.jpg ... sheet_8.jpg), each a
-40-column grid of 72x72 px photos. Each lawyer's photo_sheet and photo_pos
-say where their photo sits. If you later store one image per lawyer (for
-example in Supabase Storage), add a photo_url column and the app uses that
-instead.
+40-column grid of 72x72 px photos. photo_sheet and photo_pos say where each
+lawyer's photo sits (-1 means no photo). A photo_url column, if present and
+filled, is used instead.
 """
 from __future__ import annotations
 
 import base64
+import hmac
 import html
 import io
 import math
@@ -33,6 +38,22 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
+
+# Lock the light theme so the dashboard looks the same in every browser,
+# including ones set to dark mode, even if .streamlit/config.toml is missing.
+from streamlit import config as _stconfig
+
+_THEME = {
+    "theme.base": "light",
+    "theme.primaryColor": "#1B2A6B",
+    "theme.backgroundColor": "#F4F6FB",
+    "theme.secondaryBackgroundColor": "#FFFFFF",
+    "theme.textColor": "#141B33",
+}
+if any(_stconfig.get_option(k) != v for k, v in _THEME.items()):
+    for _k, _v in _THEME.items():
+        _stconfig.set_option(_k, _v)
+    st.rerun()
 
 HERE = Path(__file__).parent
 CSV_PATH = HERE / "lawyers.csv"
@@ -120,46 +141,123 @@ st.markdown(
 # --------------------------------------------------------------------------
 # Data
 # --------------------------------------------------------------------------
-def _supabase_settings() -> dict | None:
+def _secret_section(name: str) -> dict | None:
     try:
-        cfg = st.secrets["supabase"]
-        return {"url": cfg["url"], "key": cfg["key"], "table": cfg.get("table", "lawyers")}
+        return dict(st.secrets[name])
     except Exception:
         return None
 
 
+SUPABASE = _secret_section("supabase")
+PASSWORDS = _secret_section("passwords")
+
+
+def _supabase_client():
+    from supabase import create_client
+
+    return create_client(SUPABASE["url"], SUPABASE.get("anon_key") or SUPABASE["key"])
+
+
+# --------------------------------------------------------------------------
+# Login
+# --------------------------------------------------------------------------
+def login_screen() -> None:
+    st.markdown(
+        "<style>[data-testid='stSidebar'],[data-testid='stSidebarCollapsedControl']{display:none}"
+        ".block-container{max-width:460px;padding-top:9vh}</style>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="brand"><div class="logo">⚖️</div><div><b>Justice Dashboard</b>'
+        "<span>Punjab lawyers directory · sign in to continue</span></div></div>",
+        unsafe_allow_html=True,
+    )
+    if not SUPABASE and not PASSWORDS:
+        st.error("Login isn't set up yet. Add a [supabase] or [passwords] section to the app's secrets "
+                 "(Manage app → Settings → Secrets). See README.md for the exact text.")
+        st.stop()
+    with st.form("login"):
+        user = st.text_input("Email" if SUPABASE else "Username")
+        pw = st.text_input("Password", type="password")
+        ok = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+    if ok:
+        if SUPABASE:
+            try:
+                res = _supabase_client().auth.sign_in_with_password({"email": user.strip(), "password": pw})
+                st.session_state.auth = {"user": res.user.email, "token": res.session.access_token}
+                st.rerun()
+            except Exception:
+                st.error("Email or password is incorrect.")
+        else:
+            expected = PASSWORDS.get(user.strip())
+            if expected is not None and hmac.compare_digest(str(expected), pw):
+                st.session_state.auth = {"user": user.strip(), "token": None}
+                st.rerun()
+            else:
+                st.error("Username or password is incorrect.")
+
+
+if "auth" not in st.session_state:
+    login_screen()
+    st.stop()
+
+
+# --------------------------------------------------------------------------
+# Data
+# --------------------------------------------------------------------------
 @st.cache_data(ttl=600, show_spinner="Loading lawyers…")
-def load_data() -> tuple[pd.DataFrame, str]:
-    cfg = _supabase_settings()
-    if cfg:
-        from supabase import create_client
+def load_supabase(url: str, table: str, _token: str) -> pd.DataFrame:
+    pg = _supabase_client().postgrest
+    pg.auth(_token)  # read as the signed-in user, so the table's read policy applies
+    rows, start, step = [], 0, 1000  # Supabase returns at most 1,000 rows per request
+    while True:
+        batch = pg.from_(table).select("*").order("id").range(start, start + step - 1).execute().data
+        rows.extend(batch)
+        if len(batch) < step:
+            break
+        start += step
+    return pd.DataFrame(rows)
 
-        client = create_client(cfg["url"], cfg["key"])
-        rows, start, step = [], 0, 1000  # Supabase returns at most 1,000 rows per request
-        while True:
-            batch = (client.table(cfg["table"]).select("*").order("id")
-                     .range(start, start + step - 1).execute().data)
-            rows.extend(batch)
-            if len(batch) < step:
-                break
-            start += step
-        df = pd.DataFrame(rows)
-        source = "Supabase"
-    else:
-        df = pd.read_csv(CSV_PATH, dtype={"office_address": str, "parentage": str})
-        source = "lawyers.csv"
 
+@st.cache_data(show_spinner="Loading lawyers…")
+def load_csv() -> pd.DataFrame:
+    return pd.read_csv(CSV_PATH, dtype={"office_address": str, "parentage": str})
+
+
+def prepare(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     df["parentage"] = df["parentage"].fillna("")
     df["office_address"] = df["office_address"].fillna("")
     df["life_member"] = df["life_member"].astype(str).str.lower().isin(["true", "1", "yes", "t"])
-    df["photo_sheet"] = pd.to_numeric(df.get("photo_sheet"), errors="coerce")
-    df["photo_pos"] = pd.to_numeric(df.get("photo_pos"), errors="coerce")
+    df["photo_sheet"] = pd.to_numeric(df.get("photo_sheet"), errors="coerce").fillna(-1).astype(int)
+    df["photo_pos"] = pd.to_numeric(df.get("photo_pos"), errors="coerce").fillna(-1).astype(int)
     if "photo_url" not in df:
         df["photo_url"] = None
-    df["has_photo"] = df["photo_sheet"].notna() | df["photo_url"].notna()
+    df["has_photo"] = (df["photo_sheet"] >= 0) | df["photo_url"].fillna("").astype(str).str.len().gt(0)
     df["sort_name"] = df["name"].str.replace(r"^(Mr|Ms|Mrs|Mst|Dr|Miss)\.\s*", "", regex=True)
     df.loc[df["sort_name"].str.startswith("("), "sort_name"] = "~"  # unnamed card goes last
-    return df, source
+    return df
+
+
+if SUPABASE:
+    try:
+        raw = load_supabase(SUPABASE["url"], SUPABASE.get("table", "lawyers"), st.session_state.auth["token"])
+    except Exception as exc:
+        load_supabase.clear()
+        if "JWT" in str(exc) or "expired" in str(exc).lower():
+            del st.session_state["auth"]
+            st.warning("Your session expired. Please sign in again.")
+            st.rerun()
+        st.error(f"Couldn't read the lawyers table from Supabase: {exc}")
+        st.stop()
+    if raw.empty:
+        st.error("Supabase returned no rows. Check that lawyers.csv is imported and that the read policy "
+                 "from supabase_schema.sql was created.")
+        st.stop()
+    source = "Supabase"
+else:
+    raw, source = load_csv(), "lawyers.csv"
+df = prepare(raw)
 
 
 @st.cache_resource
@@ -172,6 +270,8 @@ def load_sheet(k: int) -> Image.Image | None:
 
 @st.cache_data(max_entries=5000)
 def photo_data_uri(sheet: int, pos: int) -> str | None:
+    if sheet < 0 or pos < 0:
+        return None
     img = load_sheet(sheet)
     if img is None:
         return None
@@ -180,9 +280,6 @@ def photo_data_uri(sheet: int, pos: int) -> str | None:
     buf = io.BytesIO()
     crop.save(buf, "JPEG", quality=88)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
-
-
-df, source = load_data()
 
 # --------------------------------------------------------------------------
 # Sidebar filters
@@ -200,6 +297,11 @@ with st.sidebar:
     chambers = st.radio("Chambers", ["All", "Local courts", "Lahore", "Not listed"], horizontal=True)
     photo = st.radio("Photo", ["All", "With photo", "Without"], horizontal=True)
     st.caption(f"Data source: {source}. Phone numbers and home addresses are not included.")
+    st.divider()
+    st.caption(f"Signed in as **{st.session_state.auth['user']}**")
+    if st.button("Sign out", use_container_width=True):
+        del st.session_state["auth"]
+        st.rerun()
 
 f = df
 if stations:
@@ -286,7 +388,7 @@ def donut(values: dict[str, int], colors: list[str], center: str) -> go.Figure:
     fig.update_traces(domain=dict(x=[0, 0.56], y=[0, 1]))
     fig.update_annotations(x=0.28, xref="paper", y=0.5, yref="paper", xanchor="center", yanchor="middle")
     style(fig, 200)
-    fig.update_layout(showlegend=True, legend=dict(orientation="v", x=0.62, y=0.5, yanchor="middle", font=dict(size=13)))
+    fig.update_layout(showlegend=True, legend=dict(orientation="v", x=0.62, y=0.5, yanchor="middle", font=dict(size=13, color=INK)))
     return fig
 
 
@@ -417,7 +519,7 @@ with st.container(border=True):
         def card(r) -> str:
             name = html.escape(str(r["name"]))
             uri = r["photo_url"] if isinstance(r["photo_url"], str) and r["photo_url"] else None
-            if uri is None and pd.notna(r["photo_sheet"]):
+            if uri is None and r["photo_sheet"] >= 0:
                 uri = photo_data_uri(int(r["photo_sheet"]), int(r["photo_pos"]))
             if uri:
                 pic = f'<img class="ph" src="{html.escape(uri)}" alt="Photo of {name}">'
